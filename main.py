@@ -23,7 +23,7 @@ from fvcore.nn import flop_count_table
 from fvcore.nn import FlopCountAnalysis
 import timm.models
 from timm.models.factory import create_model
-
+from util.misc import NestedTensor
 
 
 def get_args_parser():
@@ -123,7 +123,7 @@ def main(args):
 
     if utils.get_rank() == 0:
         model.eval()
-        flops = FlopCountAnalysis(model, torch.rand(1, 3, 640, 480).to(device))
+        flops = FlopCountAnalysis(model, NestedTensor(torch.rand(1, 3, 640, 480).to(device), torch.zeros(1,3,640,480)))
         if args.rank == 0:
             print(flop_count_table(flops))
         model.train()
