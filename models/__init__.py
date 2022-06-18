@@ -3,4 +3,4 @@ from .TSTT import build
 
 
 def build_model(args):
-    return build(args)
+    return build(args, args)

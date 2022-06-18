@@ -19,7 +19,7 @@ from timm.models.factory import create_model
 
 class DETR(nn.Module):
     """ This is the DETR module that performs object detection """
-    def __init__(self, backbone, transformer, num_queries, final_embed = 4):
+    def __init__(self, backbone, transformer, num_queries = 1, final_embed = 4, multi_final = False):
         """ Initializes the model.
         Parameters:
             backbone: torch module of the backbone to be used. See backbone.py
@@ -29,10 +29,22 @@ class DETR(nn.Module):
                          DETR can detect in a single image. For COCO, we recommend 100 queries.
         """
         super().__init__()
-        self.num_queries = num_queries
+
+        self.multi_final = multi_final
         self.transformer = transformer
         hidden_dim = transformer.d_model
-        self.finnal_embed = MLP(hidden_dim, hidden_dim, final_embed, 3)
+        if multi_final:
+            
+            self.finnal_embed = nn.ModuleList([nn.Linear(hidden_dim, final_embed) for _ in range(num_queries)])
+            num_queries = 1
+        else:
+            self.num_queries = num_queries
+            if final_embed == 4:
+                self.finnal_embed = MLP(hidden_dim, hidden_dim, final_embed, 3)
+            else:
+                self.finnal_embed = nn.Linear(hidden_dim, final_embed)
+
+
         self.query_embed = nn.Embedding(num_queries, hidden_dim)
         self.input_proj = nn.Conv2d(backbone.num_channels, hidden_dim, kernel_size=1)
         self.backbone = backbone
@@ -58,7 +70,15 @@ class DETR(nn.Module):
         assert mask is not None
         hs = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])[0]
 
-        outputs = self.finnal_embed(hs)
+        if self.multi_final:
+            outputs = []
+            for m in self.finnal_embed:
+                outputs.append(m(hs))
+            
+            outputs = torch.cat(outputs, -2)
+            # print(f"=========={outputs.shape, len(self.finnal_embed)}==========")
+        else:
+            outputs = self.finnal_embed(hs)
         return outputs
 
 
@@ -79,7 +99,7 @@ class MLP(nn.Module):
         return x
 
 
-def build_detr(num_queries, num_embeding, args):
+def build_detr(num_queries, num_embeding, multi_final, args):
     
     backbone = build_backbone(args)
     transformer = build_transformer(args)   
@@ -87,7 +107,8 @@ def build_detr(num_queries, num_embeding, args):
         backbone,
         transformer,
         num_queries=num_queries,
-        final_embed=num_embeding
+        final_embed=num_embeding,
+        multi_final=multi_final
     )
 
     return model

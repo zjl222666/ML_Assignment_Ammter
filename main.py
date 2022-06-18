@@ -1,6 +1,7 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 import argparse
 import datetime
+from email.policy import strict
 import imp
 import json
 import random
@@ -16,6 +17,7 @@ from tensorboardX import SummaryWriter
 
 import util.misc as utils
 from datasets.datasets import build_dataset
+from datasets.selfdata import build_self_dataset
 from engine import evaluate, train_one_epoch
 from models import build_model
 import logging
@@ -29,14 +31,21 @@ from util.misc import NestedTensor
 def get_args_parser():
     parser = argparse.ArgumentParser('Set transformer detector', add_help=False)
     parser.add_argument('--lr', default=1e-4, type=float)
-    parser.add_argument('--lr_backbone', default=1e-4, type=float)
+    parser.add_argument('--lr_backbone', default=1e-5, type=float)
     parser.add_argument('--batch_size', default=6, type=int)
     parser.add_argument('--weight_decay', default=1e-4, type=float)
-    parser.add_argument('--epochs', default=300, type=int)
+    parser.add_argument('--epochs', default=600, type=int)
     parser.add_argument('--cl_start_ep', default=300, type=int)
     parser.add_argument('--lr_drop', default=200, type=int)
     parser.add_argument('--clip_max_norm', default=0.1, type=float,
                         help='gradient clipping max norm')
+    
+    parser.add_argument('--box_detector', default='')
+    parser.add_argument('--text_classifier', default='')
+    parser.add_argument('--multi_final', action='store_true')
+    parser.add_argument('--one_stage', action='store_true')
+    parser.add_argument('--no_aug', action="store_true")
+    parser.add_argument('--giou_coef', default=0., type=float)
 
     # Model parameters
     parser.add_argument('--frozen_weights', type=str, default=None,
@@ -65,8 +74,6 @@ def get_args_parser():
                         help="Dropout applied in the transformer")
     parser.add_argument('--nheads', default=8, type=int,
                         help="Number of attention heads inside the transformer's attentions")
-    parser.add_argument('--num_queries', default=100, type=int,
-                        help="Number of query slots")
     parser.add_argument('--pre_norm', action='store_true')
 
     # dataset parameters
@@ -79,12 +86,18 @@ def get_args_parser():
     parser.add_argument('--resume', default='', help='resume from checkpoint')
 
     parser.add_argument('--eval', action='store_true')
+    parser.add_argument('--no_load_lr', action='store_true')
     parser.add_argument('--num_workers', default=2, type=int)
 
     # distributed training parameters
+    parser.add_argument('--port', default=29530, type=int)
     parser.add_argument('--world_size', default=1, type=int,
                         help='number of distributed processes')
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
+    
+
+
+    
     return parser
 
 
@@ -115,6 +128,7 @@ def main(args):
 
     model, criterion = build_model(args)
     model.to(device)
+    criterion.to(device)
 
     model_without_ddp = model
     if args.distributed:
@@ -123,7 +137,7 @@ def main(args):
 
     if utils.get_rank() == 0:
         model.eval()
-        flops = FlopCountAnalysis(model, NestedTensor(torch.rand(1, 3, 640, 480).to(device), torch.zeros(1,3,640,480)))
+        flops = FlopCountAnalysis(model, torch.rand(1, 3, 480, 640).to(device))
         if args.rank == 0:
             print(flop_count_table(flops))
         model.train()
@@ -148,8 +162,13 @@ def main(args):
         torch.distributed.barrier()
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
 
-    dataset_train = build_dataset(root = args.dataset_path, train=True)
-    dataset_val = build_dataset(root = args.dataset_path, train=False)
+    if not args.one_stage:
+        dataset_train = build_dataset(root = args.dataset_path, train=True, noAug = args.no_aug)
+        dataset_val = build_dataset(root = args.dataset_path, train=False)
+    else:
+        dataset_train = build_self_dataset(args.dataset_path, 2000)
+        dataset_val = build_self_dataset(args.dataset_path, 10)
+
 
     if args.distributed:
         sampler_train = DistributedSampler(dataset_train)
@@ -169,12 +188,12 @@ def main(args):
     
     if args.distributed:
         torch.distributed.barrier()
-
+    start_epoch = 0
     try:
         checkpoint = torch.load(args.resume, map_location="cpu")
         print('>>>>>> resume from {}'.format(args.resume))
         model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
-        if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
+        if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint and not args.no_load_lr:
             optimizer.load_state_dict(checkpoint['optimizer'])
             lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
             start_epoch = checkpoint['epoch'] + 1
@@ -184,6 +203,22 @@ def main(args):
     if args.eval:
         test_stats = evaluate(model, criterion, data_loader_val, device)
         return
+
+    if args.box_detector != "":
+        checkpoint = torch.load(args.box_detector, map_location="cpu")['model']
+        keys = list(checkpoint.keys())
+        for key in keys:
+            if key.startswith("text_classifier"):
+                del checkpoint[key]
+    
+        model_without_ddp.load_state_dict(checkpoint, strict=False)
+        print("load box_detector")
+    
+    if args.text_classifier != "":
+        checkpoint = torch.load(args.text_classifier, map_location="cpu")['model']
+        model_without_ddp.text_classifier.load_state_dict(checkpoint)
+        print("load text_classifier")
+
 
     print("Start training")
     start_time = time.time()
@@ -198,15 +233,16 @@ def main(args):
         start_idx += len(data_loader_train)
         lr_scheduler.step()
         try:
-            checkpoint_path = args.resume
-            # extra checkpoint before LR drop and every 100 epochs
-            torch.save({
-                'model': model_without_ddp.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'lr_scheduler': lr_scheduler.state_dict(),
-                'epoch': epoch,
-                'args': args,
-            }, checkpoint_path)
+            if utils.get_rank() == 0:
+                checkpoint_path = args.resume
+                # extra checkpoint before LR drop and every 100 epochs
+                torch.save({
+                    'model': model_without_ddp.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'lr_scheduler': lr_scheduler.state_dict(),
+                    'epoch': epoch,
+                    'args': args,
+                }, checkpoint_path)
         except:
             raise RuntimeError
 

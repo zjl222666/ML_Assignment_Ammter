@@ -5,6 +5,7 @@ import json
 from PIL import Image
 import io
 from pathlib import Path
+from torchvision.transforms import ColorJitter
 import datasets.transforms as T
 import torch
 
@@ -27,20 +28,29 @@ class EMDataset():
         for line in lines:
             secs= line.split('\t')
             name, jsonobj = secs[0], json.loads(secs[1])[0]
-            metas_names.append(os.path.join(root, name))
-            w0, h0 = jsonobj['points'][0][0], jsonobj['points'][0][1]
-            w1, h1 = jsonobj['points'][2][0], jsonobj['points'][2][1]
+            
+            w0, h0 = 1000, 1000
+            w1, h1 = 0, 0
+            for i in jsonobj['points']:
+                w0 = min(i[0], w0)
+                h0 = min(i[1], h0)
+                w1 = max(i[0], w1)
+                h1 = max(i[1], h1)
             label = dict()
             label['boxes'] = torch.tensor([w0,h0,w1,h1])
 
-            label['text'] = torch.tensor([11] * 6)
+            label['text'] = torch.tensor([10] * 6)
             try:
+                assert label['boxes'][0] < label['boxes'][2] and label['boxes'][1] < label['boxes'][3], "position error"
+                assert jsonobj['transcription'] != ""
                 for id, num in enumerate(jsonobj['transcription']):
                     label['text'][id] = int(num)
                 metas_labels.append(label)
+                metas_names.append(os.path.join(root, name))
                 self.num += 1
             except:
                 print(f"failed in load line {line}")
+            
         
         self.metas_names = np.string_(metas_names)
         self.metas_labels = metas_labels
@@ -78,28 +88,25 @@ def build_transfrom(train = True):
         T.ToTensor(),
         T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
-    # scales = [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
     if train:
         return T.Compose([
             # T.RandomHorizontalFlip(),
-            # T.RandomSelect(
-            #     T.RandomResize(scales, max_size=1333),
-            #     T.Compose([
-            #         T.RandomResize([400, 500, 600]),
-            #         T.RandomSizeCrop(384, 600),
-            #         T.RandomResize(scales, max_size=1333),
-            #     ])
-            # ),
+            T.ColorJitter(),      
+            T.RandomSizeCrop(),
+            T.RandomResize([50, 100, 224, 300, 384, 400, 480, 640]),
+            T.RandomPad(100),
+            T.RandomResize([480], max_size=640),
             normalize,
         ])
     else:
         return T.Compose([
-            # T.RandomResize([800], max_size=1333),
+            T.FixPad(),
+            T.RandomResize([480], max_size=640),  
             normalize
         ])
 
 
-def build_dataset(root, train = True):
-    transform = build_transfrom(train)
+def build_dataset(root, train = True, noAug = False):
+    transform = build_transfrom(train and not noAug,)
     dataset = EMDataset(root, train, transform=transform)
     return dataset

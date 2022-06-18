@@ -13,7 +13,65 @@ from  torchvision.transforms import ToPILImage
 
 from util.box_ops import box_xyxy_to_cxcywh
 from util.misc import interpolate
+import random
 
+
+def get_region(image, target):
+    w, h = image.size
+    boxes = target["boxes"]
+    x1, y1, x2, y2 = boxes
+    x1, y1, x2, y2 = x1.item(), y1.item(), x2.item(), y2.item()
+    left = random.randint(0, x1)
+    top = random.randint(0, y1)
+
+    height = random.randint(y2 - top, h - top)
+    width = random.randint(x2 - left, w - left)
+    # print(f"========{ x1, y1, x2, y2}=======")
+    # print(f"========{top, left, height, width}=======")
+    return top, left, height, width
+
+class ColorJitter(object):
+    def __init__(self, brightness=0.5, contrast=0.5, saturation=0.5, hue=0.5) -> None:
+        self.bright = brightness
+        self.contrast = contrast
+        self.saturation = saturation
+        self.hue = hue
+        self.color_aug = T.ColorJitter( brightness = brightness,
+            contrast = contrast,
+            saturation = saturation,
+            hue = hue)
+
+    def __call__(self, img: PIL.Image.Image, target: dict):
+        return self.color_aug(img), target
+
+
+class RandomSizeCrop(object):
+    def __init__(self):
+        pass
+
+
+    def __call__(self, img: PIL.Image.Image, target: dict):
+        region = get_region(img, target)
+        return crop(img, target, region)
+
+
+class Normalize(object):
+    def __init__(self, mean, std):
+        self.mean = mean
+        self.std = std
+
+    def __call__(self, image, target=None):
+        image = F.normalize(image, mean=self.mean, std=self.std)
+        if target is None:
+            return image, None
+        target = target.copy()
+        h, w = image.shape[-2:]
+        if "boxes" in target:
+            boxes = target["boxes"]
+            boxes = box_xyxy_to_cxcywh(boxes)
+            boxes = boxes / torch.tensor([w, h, w, h], dtype=torch.float32)
+            target["boxes"] = boxes.squeeze()
+        return image, target
 
 def crop(image, target, region):
     cropped_image = F.crop(image, *region)
@@ -43,17 +101,17 @@ def crop(image, target, region):
         fields.append("masks")
 
     # remove elements for which the boxes or masks that have zero area
-    if "boxes" in target or "masks" in target:
-        # favor boxes selection when defining which elements to keep
-        # this is compatible with previous implementation
-        if "boxes" in target:
-            cropped_boxes = target['boxes'].reshape(-1, 2, 2)
-            keep = torch.all(cropped_boxes[:, 1, :] > cropped_boxes[:, 0, :], dim=1)
-        else:
-            keep = target['masks'].flatten(1).any(1)
+    # if "boxes" in target or "masks" in target:
+    #     # favor boxes selection when defining which elements to keep
+    #     # this is compatible with previous implementation
+    #     if "boxes" in target:
+    #         cropped_boxes = target['boxes'].reshape(-1, 2, 2)
+    #         keep = torch.all(cropped_boxes[:, 1, :] > cropped_boxes[:, 0, :], dim=1)
+    #     else:
+    #         keep = target['masks'].flatten(1).any(1)
 
-        for field in fields:
-            target[field] = target[field][keep]
+    #     for field in fields:
+    #         target[field] = target[field][keep]
 
     return cropped_image, target
 
@@ -136,14 +194,16 @@ def resize(image, target, size, max_size=None):
 
 def pad(image, target, padding):
     # assumes that we only pad on the bottom right corners
-    padded_image = F.pad(image, (0, 0, padding[0], padding[1]))
+    if random.random() > 0.5:
+        padded_image = F.pad(image, (padding[0], padding[1], padding[2], padding[3]), padding_mode="edge")
+    else:
+        padded_image = F.pad(image, (padding[0], padding[1], padding[2], padding[3]), fill=(0, 0, 0))
     if target is None:
         return padded_image, None
     target = target.copy()
     # should we do something wrt the original size?
     target["size"] = torch.tensor(padded_image.size[::-1])
-    if "masks" in target:
-        target['masks'] = torch.nn.functional.pad(target['masks'], (0, padding[0], 0, padding[1]))
+    target["boxes"] = target["boxes"] + torch.tensor([padding[0], padding[1], padding[0], padding[1]])
     return padded_image, target
 
 
@@ -155,17 +215,6 @@ class RandomCrop(object):
         region = T.RandomCrop.get_params(img, self.size)
         return crop(img, target, region)
 
-
-class RandomSizeCrop(object):
-    def __init__(self, min_size: int, max_size: int):
-        self.min_size = min_size
-        self.max_size = max_size
-
-    def __call__(self, img: PIL.Image.Image, target: dict):
-        w = random.randint(self.min_size, min(img.width, self.max_size))
-        h = random.randint(self.min_size, min(img.height, self.max_size))
-        region = T.RandomCrop.get_params(img, [h, w])
-        return crop(img, target, region)
 
 
 class CenterCrop(object):
@@ -200,6 +249,11 @@ class RandomResize(object):
         size = random.choice(self.sizes)
         return resize(img, target, size, self.max_size)
 
+class FixPad(object):
+    def __init__(self):
+        pass
+    def __call__(self, img, target):
+        return pad(img, target, (50, 50, 50, 50))
 
 class RandomPad(object):
     def __init__(self, max_pad):
@@ -208,7 +262,9 @@ class RandomPad(object):
     def __call__(self, img, target):
         pad_x = random.randint(0, self.max_pad)
         pad_y = random.randint(0, self.max_pad)
-        return pad(img, target, (pad_x, pad_y))
+        pad_x_1 = random.randint(0, self.max_pad)
+        pad_y_1 = random.randint(0, self.max_pad)
+        return pad(img, target, (pad_x, pad_y,pad_x_1,pad_y_1))
 
 
 class RandomSelect(object):
@@ -241,23 +297,7 @@ class RandomErasing(object):
         return self.eraser(img), target
 
 
-class Normalize(object):
-    def __init__(self, mean, std):
-        self.mean = mean
-        self.std = std
 
-    def __call__(self, image, target=None):
-        image = F.normalize(image, mean=self.mean, std=self.std)
-        if target is None:
-            return image, None
-        target = target.copy()
-        h, w = image.shape[-2:]
-        if "boxes" in target:
-            boxes = target["boxes"]
-            boxes = box_xyxy_to_cxcywh(boxes)
-            boxes = boxes / torch.tensor([w, h, w, h], dtype=torch.float32)
-            target["boxes"] = boxes
-        return image, target
 
 
 class Compose(object):
