@@ -90,7 +90,7 @@ class Backbone(BackboneBase):
 
 
         Batchnorm = nn.BatchNorm2d
-        backbone = getattr(torchvision.models, "resnet34")(
+        backbone = getattr(torchvision.models, name)(
             replace_stride_with_dilation=[False, False, dilation],
             pretrained=False, norm_layer=Batchnorm)
         # if is_main_process():

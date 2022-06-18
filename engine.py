@@ -14,13 +14,17 @@ import util.misc as utils
 
 def cal_correct(text_output, target):
     # cal_total_correct
+    text_output = text_output[-1]
     text_output = text_output.softmax(-1).max(-1).indices
+
+    assert text_output.shape == target.shape, f"{text_output.shape}!={target.shape}"
+
     equal = text_output == target
 
     all_correct = equal.sum()
     all_num = text_output.numel()
 
-    instanse_correct = equal.sum(-1).eq(6)
+    instanse_correct = equal.sum(-1).eq(6).sum()
     instanse_num = text_output.shape[0]
 
     return all_correct/all_num, instanse_correct/instanse_num
@@ -44,12 +48,13 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
         outputs = model(samples)
-        losses = criterion(outputs, targets, text_coef = 1.0 if epoch > cl_start_ep else 0.,metric_logger = metric_logger)
+        losses = criterion(outputs, targets, box = False if epoch > cl_start_ep else True,metric_logger = metric_logger)
 
         loss_value = losses.item()
 
         if not math.isfinite(loss_value):
             print("Loss is {}, stopping training".format(loss_value))
+            print(f"outputs is {outputs} and target is {targets}")
             print(loss_value)
             sys.exit(1)
 
@@ -59,7 +64,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
         optimizer.step()
         
-        total_acc,  ins_acc = cal_correct(outputs[-1], target=targets['text'])
+        total_acc,  ins_acc = cal_correct(outputs,  torch.stack([t['text'] for t in targets]))
 
         torch.cuda.synchronize()
         metric_logger.update(loss_total=loss_value)
@@ -87,7 +92,6 @@ def evaluate(model, criterion, data_loader, device):
     criterion.eval()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
-    metric_logger.add_meter('loss_boxes', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
     metric_logger.add_meter('total_acc', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
     metric_logger.add_meter('ins_acc', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
     
@@ -100,7 +104,7 @@ def evaluate(model, criterion, data_loader, device):
         outputs = model(samples)
         losses = criterion(outputs, targets, metric_logger = metric_logger)
         loss_value = losses.item()
-        total_acc,  ins_acc = cal_correct(outputs[-1], target=targets['text'])
+        total_acc,  ins_acc = cal_correct(outputs,  torch.stack([t['text'] for t in targets]))
 
         torch.cuda.synchronize()
         metric_logger.update(loss_total=loss_value)

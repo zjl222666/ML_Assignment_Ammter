@@ -353,18 +353,13 @@ def nested_tensor_from_tensor_list(tensor_list: List[Tensor]):
     return NestedTensor(tensor, mask)
 
 
-def nested_tensor_from_tensor_list_fix_size(tensor_list: List[Tensor], fix_size = [3, 150, 600]):
+def nested_tensor_from_tensor_list_fix_size(tensor_list: List[Tensor], fix_size = [3, 480, 640]):
     # TODO make this more general
     if tensor_list[0].ndim == 3:
-        if torchvision._is_tracing():
-            # nested_tensor_from_tensor_list() does not export well to ONNX
-            # call _onnx_nested_tensor_from_tensor_list() instead
-            return _onnx_nested_tensor_from_tensor_list(tensor_list)
 
         # TODO make it support different-sized images
-        max_size = fix_size
         # min_size = tuple(min(s) for s in zip(*[img.shape for img in tensor_list]))
-        batch_shape = [len(tensor_list)] + max_size
+        batch_shape = [len(tensor_list)] + fix_size
         b, c, h, w = batch_shape
         dtype = tensor_list[0].dtype
         device = tensor_list[0].device
